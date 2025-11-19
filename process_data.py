@@ -1,68 +1,148 @@
+# process_data.py
+
 """
-process_data.py
-----------------
-Loads an individual player's game log CSV and performs simple
-feature engineering to prepare data for model training.
+Processes player game logs into ML-ready features.
 """
 
 import pandas as pd
-import os
+import numpy as np
+from datetime import datetime, timedelta
+
+# Import centralized NBA API client
+import nba_api_client
+
+from nba_api.stats.endpoints import (
+    playergamelog,
+    leaguedashteamstats
+)
+from nba_api.stats.static import players
 
 
 # -----------------------------------------------------
-# Clean and engineer features for a single player
+# Determine NBA season
 # -----------------------------------------------------
-def process_player_log(player_name, window=5):
+def get_current_season():
+    year = datetime.now().year
+    month = datetime.now().month
+    if month >= 10:
+        return f"{year}-{str(year+1)[-2:]}"
+    return f"{year-1}-{str(year)[-2:]}"
+
+def get_last_nba_season():
     """
-    Loads `output/<player_name>.csv`, cleans it,
-    and adds simple rolling features.
-
-    Args:
-        player_name (str): Player full name, e.g. "Devin Booker"
-        window (int): Rolling window size for averages (default 5)
+    Returns the previous NBA season as a string in 'YYYY-YY' format.
+    Example: If current season is 2025-26, returns '2024-25'
     """
-    file_path = f"output/{player_name}.csv"
+    now = datetime.now()
+    year = now.year
+    month = now.month
 
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(
-            f"No CSV found for {player_name}. "
-            f"Run get_stats.py first."
-        )
+    # NBA season typically starts in October
+    if month >= 10:
+        start_year = year - 1
+        end_year = year
+    else:
+        start_year = year - 2
+        end_year = year - 1
 
-    # Load raw data
-    df = pd.read_csv(file_path)
+    return f"{start_year}-{str(end_year)[-2:]}"
 
-    # Sort by game date (ascending)
+
+# -----------------------------------------------------
+# Load Team DEF Rating + Pace
+# -----------------------------------------------------
+def load_team_stats(season: str):
+    print("Loading team advanced stats...")
+
+    stats = leaguedashteamstats.LeagueDashTeamStats(
+        season=season,
+        measure_type_detailed_defense="Advanced"
+    ).get_data_frames()[0]
+
+    result = stats[["TEAM_ID", "TEAM_NAME", "DEF_RATING", "PACE"]]
+    return result
+
+
+# -----------------------------------------------------
+# Fetch player logs
+# -----------------------------------------------------
+def fetch_player_logs(player_name, season):
+    matches = players.find_players_by_full_name(player_name)
+    if not matches:
+        raise ValueError(f"No player found with name {player_name}")
+
+    player_id = matches[0]["id"]
+
+    print(f"Fetching game logs for {player_name}...")
+
+    df = playergamelog.PlayerGameLog(
+        player_id=player_id,
+        season=season
+    ).get_data_frames()[0]
+
+    print(f"Loaded {len(df)} games.")
+    return df
+
+
+# -----------------------------------------------------
+# Feature engineering
+# -----------------------------------------------------
+def engineer_features(df, team_stats):
+    df = df.copy()
+
     df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"])
-    df = df.sort_values("GAME_DATE").reset_index(drop=True)
+    df = df.sort_values("GAME_DATE")
 
-    # Basic features from playergamelog:
-    # PTS, REB, AST, STL, BLK, TOV, FGM, FGA, FG3M, FG3A, FT%, etc.
-    basic_cols = ["PTS", "REB", "AST", "STL", "BLK", "TOV", 
-                  "FGM", "FGA", "FG3M", "FG3A", "FTA", "FTM", "OREB", "DREB"]
+    df = df.merge(
+        team_stats,
+        left_on="MATCHUP_OPPONENT",
+        right_on="TEAM_NAME",
+        how="left"
+    )
 
-    # Keep only relevant columns + date
-    df_basic = df[["GAME_DATE"] + basic_cols].copy()
+    df.rename(columns={
+        "DEF_RATING": "OPP_DEF_RATING",
+        "PACE": "OPP_PACE"
+    }, inplace=True)
 
-    # Rolling averages
-    for col in basic_cols:
-        df_basic[f"{col}_avg_last_{window}"] = df_basic[col].rolling(window).mean()
+    df.drop(columns=["TEAM_NAME"], inplace=True)
 
-    # Target variable (next game’s points)
-    df_basic["PTS_next_game"] = df_basic["PTS"].shift(-1)
+    df["PTS_last3"] = df["PTS"].rolling(3).mean()
+    df["REB_last3"] = df["REB"].rolling(3).mean()
+    df["AST_last3"] = df["AST"].rolling(3).mean()
 
-    # Drop final row (no next game available)
-    df_clean = df_basic.dropna().reset_index(drop=True)
+    df["Is_Home"] = df["MATCHUP"].str.contains("vs").astype(int)
 
-    # Save processed dataset
-    out_path = f"output/processed_{player_name}.csv"
-    df_clean.to_csv(out_path, index=False)
+    df["Prev_Date"] = df["GAME_DATE"].shift(1)
+    df["Days_Rest"] = (df["GAME_DATE"] - df["Prev_Date"]).dt.days
+    df["Is_BackToBack"] = (df["Days_Rest"] == 1).astype(int)
 
-    print(f"Processed file saved to: {out_path}")
-    print(f"Rows: {len(df_clean)}")
-    return df_clean
+    df.drop(columns=["Prev_Date"], inplace=True)
+
+    return df
+
+
+# -----------------------------------------------------
+# Main
+# -----------------------------------------------------
+def process_player_data(player_name, season):
+    team_stats = load_team_stats(season)
+    logs = fetch_player_logs(player_name, season)
+
+    logs["MATCHUP_OPPONENT"] = logs["MATCHUP"].apply(lambda x: x.split(" ")[-1])
+
+    df = engineer_features(logs, team_stats)
+
+    out = f"output/{player_name}_processed.csv"
+    df.to_csv(out, index=False)
+
+    print(f"Saved {out}")
 
 
 if __name__ == "__main__":
-    player_name = "Devin Booker"
-    process_player_log(player_name)
+    season = get_current_season()
+    player = "Devin Booker"
+
+    print(f"Processing data for {player} ({season})...")
+    process_player_data(player, season)
+    print("Done.")
