@@ -31,8 +31,8 @@ df = df.dropna(subset=["PTS_last3", "REB_last3", "AST_last3"])
 # ----------------------------
 FEATURES = [
     "PTS_last3",
-    "REB_last3",
-    "AST_last3",
+    # "REB_last3",
+    # "AST_last3",
     "OPP_DEF_RATING",
     "OPP_PACE",
     "Is_Home",
