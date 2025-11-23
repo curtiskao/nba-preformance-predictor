@@ -91,10 +91,10 @@ def fetch_player_logs(player_name, season=None):
 
 
 # -----------------------------------------------------
-# Fetch team advanced stats
+# Fetch team advanced stats (UPDATED)
 # -----------------------------------------------------
 def fetch_team_stats(season=None):
-    """Fetch defensive rating and pace for all teams."""
+    """Fetch defensive rating, offensive rating, net rating, and pace for all teams."""
     if season is None:
         season = get_current_season()
     
@@ -102,13 +102,23 @@ def fetch_team_stats(season=None):
     
     stats = leaguedashteamstats.LeagueDashTeamStats(
         season=season,
-        measure_type_detailed_defense="Advanced"
+        measure_type_detailed_defense="Advanced"  # This gets advanced stats
     ).get_data_frames()[0]
     
-    # Keep only needed columns
-    result = stats[["TEAM_ID", "TEAM_NAME", "DEF_RATING", "PACE"]].copy()
+    # Keep only needed columns - now including OFF_RATING and NET_RATING
+    required_cols = ["TEAM_ID", "TEAM_NAME", "DEF_RATING", "OFF_RATING", "NET_RATING", "PACE"]
     
-    print(f"Retrieved stats for {len(result)} teams.")
+    # Check which columns exist
+    available_cols = [col for col in required_cols if col in stats.columns]
+    missing_cols = [col for col in required_cols if col not in stats.columns]
+    
+    if missing_cols:
+        print(f"⚠️  Warning: Missing columns: {missing_cols}")
+        print(f"Available columns: {stats.columns.tolist()}")
+    
+    result = stats[available_cols].copy()
+    
+    print(f"Retrieved stats for {len(result)} teams with columns: {available_cols}")
     return result
 
 
@@ -130,12 +140,13 @@ if __name__ == "__main__":
     # Test: Fetch specific player
     player = "Devin Booker"
     player_logs = fetch_player_logs(player, season)
-    player_logs.to_csv(f"output/{player}.csv", index=False)
+    player_logs.to_csv(f"output/{player}_raw.csv", index=False)
     print(f"Saved {player} logs: {len(player_logs)} games\n")
     
     # Test: Fetch team stats
     team_stats = fetch_team_stats(season)
     team_stats.to_csv("output/team_stats.csv", index=False)
-    print(f"Saved team stats: {len(team_stats)} teams\n")
+    print(f"\nTeam stats columns: {team_stats.columns.tolist()}")
+    print(f"Sample data:\n{team_stats.head()}\n")
     
     print("Done.")

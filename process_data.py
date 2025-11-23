@@ -12,71 +12,63 @@ import util
 # Feature engineering pipeline
 # -----------------------------------------------------
 def engineer_features(player_logs, team_stats):
-    """
-    Adds features to player game logs:
-    - Rolling averages (PTS, REB, AST)
-    - Opponent defensive rating and pace
-    - Home/away indicator
-    - Days rest and back-to-back indicator
-    """
+    """Enhanced feature engineering with more predictive features."""
     df = player_logs.copy()
     
-    # Convert and sort by date
     df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"])
     df = df.sort_values("GAME_DATE").reset_index(drop=True)
     
-    # Extract opponent team abbreviation from MATCHUP
-    # MATCHUP format: "PHX vs. LAL" or "PHX @ BOS"
+    # Opponent matching
     df["OPP_ABBREV"] = df["MATCHUP"].apply(lambda x: x.split(" ")[-1])
-    
-    # Map abbreviation to full team name
     df["OPP_TEAM_NAME"] = df["OPP_ABBREV"].map(util.NBA_TEAM_ABBREV_TO_NAME)
     
-    # Debug: Check if mapping worked
-    unmapped = df[df["OPP_TEAM_NAME"].isna()]["OPP_ABBREV"].unique()
-    if len(unmapped) > 0:
-        print(f"⚠️  Warning: Could not map these team abbreviations: {unmapped}")
-    
-    # Merge with team stats to get opponent metrics
-    df = df.merge(
-        team_stats,
-        left_on="OPP_TEAM_NAME",
-        right_on="TEAM_NAME",
-        how="left"
-    )
-    
-    # Debug: Check merge success
-    missing_stats = df["DEF_RATING"].isna().sum()
-    if missing_stats > 0:
-        print(f"⚠️  Warning: {missing_stats} games missing opponent stats")
-        print("Sample missing opponents:")
-        print(df[df["DEF_RATING"].isna()][["GAME_DATE", "MATCHUP", "OPP_TEAM_NAME"]].head())
-    
-    # Rename to make it clear these are opponent stats
+    df = df.merge(team_stats, left_on="OPP_TEAM_NAME", right_on="TEAM_NAME", how="left")
     df.rename(columns={
         "DEF_RATING": "OPP_DEF_RATING",
+        "OFF_RATING": "OPP_OFF_RATING",
+        "NET_RATING": "OPP_NET_RATING",
         "PACE": "OPP_PACE"
     }, inplace=True)
-    
-    # Drop unnecessary columns
     df.drop(columns=["TEAM_NAME", "OPP_ABBREV"], inplace=True, errors="ignore")
     
-    # Rolling averages (last 3 games)
-    df["PTS_last3"] = df["PTS"].rolling(3, min_periods=1).mean()
-    df["REB_last3"] = df["REB"].rolling(3, min_periods=1).mean()
-    df["AST_last3"] = df["AST"].rolling(3, min_periods=1).mean()
-    df["FG_PCT_last3"] = df["FG_PCT"].rolling(3, min_periods=1).mean()
-    df["MIN_last3"] = df["MIN"].rolling(3, min_periods=1).mean()
+    # ========================================
+    # ROLLING AVERAGES (with min_periods=1 to avoid NaN)
+    # ========================================
+    # Use only 3-game window for limited data
+    df["PTS_last3"] = df["PTS"].shift(1).rolling(3, min_periods=1).mean()
+    df["MIN_last3"] = df["MIN"].shift(1).rolling(3, min_periods=1).mean()
+    df["FGA_last3"] = df["FGA"].shift(1).rolling(3, min_periods=1).mean()
+    df["REB_last3"] = df["REB"].shift(1).rolling(3, min_periods=1).mean()
+    df["AST_last3"] = df["AST"].shift(1).rolling(3, min_periods=1).mean()
+    df["FG_PCT_last3"] = df["FG_PCT"].shift(1).rolling(3, min_periods=1).mean()
     
-    # Home vs away
+    # Fill first game with player's first game stats as baseline
+    for col in ["PTS_last3", "MIN_last3", "FGA_last3", "REB_last3", "AST_last3", "FG_PCT_last3"]:
+        base_col = col.replace("_last3", "")
+        df[col] = df[col].fillna(df[base_col])
+    
+    # ========================================
+    # HOME/AWAY
+    # ========================================
     df["Is_Home"] = df["MATCHUP"].str.contains("vs").astype(int)
     
-    # Days rest and back-to-back
+    # ========================================
+    # REST DAYS
+    # ========================================
     df["Prev_Date"] = df["GAME_DATE"].shift(1)
     df["Days_Rest"] = (df["GAME_DATE"] - df["Prev_Date"]).dt.days
+    # Fill first game with 3 days rest (typical)
+    df["Days_Rest"] = df["Days_Rest"].fillna(3)
     df["Is_BackToBack"] = (df["Days_Rest"] == 1).astype(int)
     
-    # Clean up temporary columns
+    # ========================================
+    # TIME FEATURES
+    # ========================================
+    df["Game_Number"] = range(1, len(df) + 1)
+    df["Month"] = df["GAME_DATE"].dt.month
+    df["Day_of_Week"] = df["GAME_DATE"].dt.dayofweek
+    
+    # Cleanup
     df.drop(columns=["Prev_Date"], inplace=True, errors="ignore")
     
     return df
@@ -99,11 +91,10 @@ def process_player_data(player_name, player_logs, team_stats):
     print(f"\nFeature completeness:")
     print(f"  - Valid OPP_DEF_RATING: {df['OPP_DEF_RATING'].notna().sum()}/{len(df)}")
     print(f"  - Valid PTS_last3: {df['PTS_last3'].notna().sum()}/{len(df)}")
-    print(f"  - Valid Days_Rest: {df['Days_Rest'].notna().sum()}/{len(df)}")
     
-    # Remove rows with NaN in critical features
+    # Only drop rows missing opponent stats (critical for predictions)
     initial_rows = len(df)
-    df = df.dropna(subset=["PTS_last3", "OPP_DEF_RATING", "Days_Rest"])
+    df = df.dropna(subset=["OPP_DEF_RATING"])
     
     print(f"\nOutput: {len(df)} games (removed {initial_rows - len(df)} incomplete rows)")
     
@@ -146,8 +137,22 @@ if __name__ == "__main__":
     
     # Show sample
     print("\nSample features:")
-    feature_cols = ["GAME_DATE", "MATCHUP", "PTS", "PTS_last3", "OPP_DEF_RATING", 
-                    "OPP_PACE", "Is_Home", "Is_BackToBack"]
-    print(processed_df[feature_cols].head(10).to_string())
+    FEATURES = [
+        # Rolling averages
+        "PTS_last3", "MIN_last3", "FGA_last3",
+        "REB_last3", "AST_last3", "FG_PCT_last3",
+        
+        # Opponent strength
+        "OPP_DEF_RATING", "OPP_OFF_RATING", "OPP_NET_RATING", "OPP_PACE",
+        
+        # Schedule
+        "Is_Home", "Is_BackToBack", "Days_Rest",
+        
+        # Time
+        "Game_Number", "Month", "Day_of_Week",
+    ]
+    
+    available_features = [f for f in FEATURES if f in processed_df.columns]
+    print(processed_df[available_features].head(10).to_string())
     
     print("\nDone.")
