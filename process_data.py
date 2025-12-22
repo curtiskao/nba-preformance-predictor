@@ -6,6 +6,8 @@ Assumes data has already been fetched via get_stats.py
 
 import pandas as pd
 import numpy as np
+import argparse
+import os
 import util
 
 # -----------------------------------------------------
@@ -61,13 +63,6 @@ def engineer_features(player_logs, team_stats):
     df["Days_Rest"] = df["Days_Rest"].fillna(3)
     df["Is_BackToBack"] = (df["Days_Rest"] == 1).astype(int)
     
-    # ========================================
-    # TIME FEATURES
-    # ========================================
-    df["Game_Number"] = range(1, len(df) + 1)
-    df["Month"] = df["GAME_DATE"].dt.month
-    df["Day_of_Week"] = df["GAME_DATE"].dt.dayofweek
-    
     # Cleanup
     df.drop(columns=["Prev_Date"], inplace=True, errors="ignore")
     
@@ -105,24 +100,32 @@ def process_player_data(player_name, player_logs, team_stats):
 # Main - for testing
 # -----------------------------------------------------
 if __name__ == "__main__":
-    import os
     from get_stats import fetch_player_logs, fetch_team_stats, get_current_season
+    
+    parser = argparse.ArgumentParser(
+        description="Process NBA player data for ML training"
+    )
+    parser.add_argument(
+        "--player",
+        type=str,
+        default="Devin Booker",
+        help="Player's full name (e.g., 'LeBron James', 'Stephen Curry')"
+    )
+    
+    args = parser.parse_args()
     
     os.makedirs("output", exist_ok=True)
     
     season = get_current_season()
-    player = "Devin Booker"
+    player = args.player
     
     # Fetch data
-    print("Fetching data...\n")
+    print(f"Fetching data for {player}...\n")
     player_logs = fetch_player_logs(player, season)
     team_stats = fetch_team_stats(season)
     
     print(f"\nTeam stats loaded: {len(team_stats)} teams")
-    print("Sample team names:", team_stats["TEAM_NAME"].head(5).tolist())
-    
-    print(f"\nPlayer logs loaded: {len(player_logs)} games")
-    print("Sample matchups:", player_logs["MATCHUP"].head(5).tolist())
+    print(f"Player logs loaded: {len(player_logs)} games")
     
     # Process data
     print("\n" + "="*60)
@@ -135,24 +138,4 @@ if __name__ == "__main__":
     processed_df.to_csv(output_path, index=False)
     print(f"\n✓ Saved to {output_path}")
     
-    # Show sample
-    print("\nSample features:")
-    FEATURES = [
-        # Rolling averages
-        "PTS_last3", "MIN_last3", "FGA_last3",
-        "REB_last3", "AST_last3", "FG_PCT_last3",
-        
-        # Opponent strength
-        "OPP_DEF_RATING", "OPP_OFF_RATING", "OPP_NET_RATING", "OPP_PACE",
-        
-        # Schedule
-        "Is_Home", "Is_BackToBack", "Days_Rest",
-        
-        # Time
-        "Game_Number", "Month", "Day_of_Week",
-    ]
-    
-    available_features = [f for f in FEATURES if f in processed_df.columns]
-    print(processed_df[available_features].head(10).to_string())
-    
-    print("\nDone.")
+    print(f"\nNext step: python train_model.py --player \"{player}\"")

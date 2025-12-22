@@ -1,6 +1,6 @@
 """
-predict_points.py
------------------
+prediction.py
+-------------
 Predicts the next game's points for a player based on:
 1. Their recent performance (rolling averages)
 2. The upcoming opponent's stats
@@ -13,15 +13,18 @@ import joblib
 import json
 import argparse
 import os
-from datetime import datetime
 
 
 # -------------------------------------------------------
 # LOAD MODEL + METADATA
 # -------------------------------------------------------
-def load_model(model_path):
+def load_model(player_name):
+    model_path = f"models/{player_name}_points_model.pkl"
+    
     if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Model file not found: {model_path}")
+        print(f"❌ Model not found: {model_path}")
+        print(f"Train a model first: python train_model.py --player \"{player_name}\"")
+        exit(1)
 
     print(f"✓ Loading model: {model_path}")
     model = joblib.load(model_path)
@@ -39,7 +42,9 @@ def load_model(model_path):
 def load_processed_data(player_name):
     csv_path = f"output/{player_name}_processed.csv"
     if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"Processed CSV not found: {csv_path}")
+        print(f"❌ Processed data not found: {csv_path}")
+        print(f"Run this first: python process_data.py --player \"{player_name}\"")
+        exit(1)
 
     df = pd.read_csv(csv_path)
     df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"])
@@ -55,10 +60,9 @@ def load_team_stats():
     """Load pre-fetched team stats from output folder."""
     team_stats_path = "output/team_stats.csv"
     if not os.path.exists(team_stats_path):
-        raise FileNotFoundError(
-            f"Team stats not found at {team_stats_path}.\n"
-            "Run get_stats.py first to fetch team stats."
-        )
+        print(f"❌ Team stats not found: {team_stats_path}")
+        print("Run this first: python process_data.py --player \"Player Name\"")
+        exit(1)
     
     df = pd.read_csv(team_stats_path)
     return df
@@ -77,17 +81,6 @@ def build_next_game_features(
 ):
     """
     Constructs feature vector for the next game.
-    
-    Args:
-        recent_games_df: DataFrame of player's recent games (sorted by date)
-        opponent_team_name: Full name of opponent (e.g., "Los Angeles Lakers")
-        team_stats_df: DataFrame with team stats (DEF_RATING, PACE, etc.)
-        is_home: True if home game, False if away
-        days_rest: Days since last game
-        feature_list: List of features the model expects
-    
-    Returns:
-        feature_dict: Dictionary of feature name -> value
     """
     
     feature_dict = {}
@@ -97,7 +90,7 @@ def build_next_game_features(
     if opp_row.empty:
         print(f"⚠️  Warning: Opponent '{opponent_team_name}' not found in team stats.")
         print("    Using default values for opponent features.")
-        opp_def_rating = 110.0  # League average
+        opp_def_rating = 110.0
         opp_off_rating = 110.0
         opp_net_rating = 0.0
         opp_pace = 100.0
@@ -111,7 +104,7 @@ def build_next_game_features(
     # Calculate rolling averages from recent games
     last_3_games = recent_games_df.tail(3)
     
-    # Build features based on what the model expects
+    # Build features
     if feature_list:
         for feat in feature_list:
             # Rolling averages
@@ -146,16 +139,7 @@ def build_next_game_features(
             elif feat == "Days_Rest":
                 feature_dict[feat] = days_rest
             
-            # Time features
-            elif feat == "Game_Number":
-                feature_dict[feat] = len(recent_games_df) + 1
-            elif feat == "Month":
-                feature_dict[feat] = pd.Timestamp.now().month
-            elif feat == "Day_of_Week":
-                feature_dict[feat] = pd.Timestamp.now().dayofweek
-            
             else:
-                # Unknown feature, use 0
                 feature_dict[feat] = 0.0
                 print(f"⚠️  Unknown feature '{feat}', using 0")
     
@@ -166,24 +150,17 @@ def build_next_game_features(
 # MAIN PREDICTION LOGIC
 # -------------------------------------------------------
 def predict_next_game(
-    model_path,
+    player_name,
     opponent_team_name,
     is_home=True,
     days_rest=2
 ):
     """
     Predict points for next game.
-    
-    Args:
-        model_path: Path to saved model .pkl file
-        opponent_team_name: Full opponent name (e.g., "Los Angeles Lakers")
-        is_home: True if home game
-        days_rest: Days since last game
     """
     
     # 1. Load model + metadata
-    model, metadata = load_model(model_path)
-    player_name = metadata["player_name"]
+    model, metadata = load_model(player_name)
     features = metadata["features"]
 
     print(f"\n{'='*60}")
@@ -216,8 +193,8 @@ def predict_next_game(
         feature_list=features
     )
 
-    # 5. Convert to array in correct order
-    X = np.array([feature_dict[f] for f in features]).reshape(1, -1)
+    # 5. Convert to DataFrame (preserves feature names, fixes warning)
+    X = pd.DataFrame([feature_dict], columns=features)
 
     # 6. Make prediction
     predicted_points = model.predict(X)[0]
@@ -236,7 +213,6 @@ def predict_next_game(
     
     print(f"\nOpponent Strength ({opponent_team_name}):")
     print(f"  DEF Rating: {feature_dict.get('OPP_DEF_RATING', 0):.1f}")
-    print(f"  OFF Rating: {feature_dict.get('OPP_OFF_RATING', 0):.1f}")
     print(f"  PACE: {feature_dict.get('OPP_PACE', 0):.1f}")
     
     print(f"\nAll features used:")
@@ -258,10 +234,10 @@ if __name__ == "__main__":
         description="Predict NBA player points for next game"
     )
     parser.add_argument(
-        "--model",
+        "--player",
         type=str,
-        default="models/Devin Booker_points_model.pkl",
-        help="Path to saved model .pkl"
+        default="Devin Booker",
+        help="Player's full name (e.g., 'LeBron James', 'Stephen Curry')"
     )
     parser.add_argument(
         "--opponent",
@@ -284,7 +260,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     predict_next_game(
-        model_path=args.model,
+        player_name=args.player,
         opponent_team_name=args.opponent,
         is_home=args.home,
         days_rest=args.rest
