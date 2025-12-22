@@ -7,7 +7,8 @@ using engineered features from processed player data.
 import pandas as pd
 import numpy as np
 import argparse
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import Ridge
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 import joblib
 import os
@@ -22,6 +23,7 @@ def train_model(player_name):
     # ----------------------------
     INPUT_FILE = f"output/{player_name}_processed.csv"
     MODEL_FILE = f"models/{player_name}_points_model.pkl"
+    SCALER_FILE = f"models/{player_name}_scaler.pkl"
     TARGET = "PTS"
 
     # ----------------------------
@@ -97,19 +99,22 @@ def train_model(player_name):
     print(f"Test set:  {len(X_test)} games (from {test_df['GAME_DATE'].min().date()})")
 
     # ----------------------------
+    # SCALE FEATURES (important for Ridge)
+    # ----------------------------
+    print("\nScaling features...")
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+    # ----------------------------
     # TRAIN MODEL
     # ----------------------------
-    print("\nTraining Random Forest model...")
+    print("Training Ridge Regression model...")
+    print("(Using Ridge instead of Random Forest for small dataset)\n")
 
-    model = RandomForestRegressor(
-        n_estimators=50,
-        max_depth=3,
-        min_samples_leaf=3,
-        random_state=42,
-        n_jobs=-1
-    )
-
-    model.fit(X_train, y_train)
+    # Ridge regression works much better with small datasets
+    model = Ridge(alpha=1.0)
+    model.fit(X_train_scaled, y_train)
     print("✓ Model trained")
 
     # ----------------------------
@@ -120,7 +125,7 @@ def train_model(player_name):
     print("="*60)
 
     # Training set
-    y_train_pred = model.predict(X_train)
+    y_train_pred = model.predict(X_train_scaled)
     train_r2 = r2_score(y_train, y_train_pred)
     train_mae = mean_absolute_error(y_train, y_train_pred)
     train_rmse = np.sqrt(mean_squared_error(y_train, y_train_pred))
@@ -131,7 +136,7 @@ def train_model(player_name):
     print(f"  RMSE:     {train_rmse:.2f} points")
 
     # Test set
-    y_test_pred = model.predict(X_test)
+    y_test_pred = model.predict(X_test_scaled)
     test_r2 = r2_score(y_test, y_test_pred)
     test_mae = mean_absolute_error(y_test, y_test_pred)
     test_rmse = np.sqrt(mean_squared_error(y_test, y_test_pred))
@@ -142,18 +147,19 @@ def train_model(player_name):
     print(f"  RMSE:     {test_rmse:.2f} points")
 
     # ----------------------------
-    # FEATURE IMPORTANCE
+    # FEATURE IMPORTANCE (coefficients)
     # ----------------------------
     print("\n" + "="*60)
-    print("FEATURE IMPORTANCE")
+    print("FEATURE COEFFICIENTS")
     print("="*60)
 
-    feature_importance = pd.DataFrame({
+    feature_coefs = pd.DataFrame({
         "Feature": FEATURES,
-        "Importance": model.feature_importances_
-    }).sort_values("Importance", ascending=False)
+        "Coefficient": model.coef_
+    }).sort_values("Coefficient", key=abs, ascending=False)
 
-    print("\n" + feature_importance.to_string(index=False))
+    print("\n" + feature_coefs.to_string(index=False))
+    print("\nNote: Larger absolute values = more important features")
 
     # ----------------------------
     # SAMPLE PREDICTIONS
@@ -163,22 +169,24 @@ def train_model(player_name):
     print("="*60)
 
     test_sample = test_df.copy()
-    test_sample["Predicted_PTS"] = model.predict(test_sample[FEATURES])
+    test_sample["Predicted_PTS"] = y_test_pred
     test_sample["Error"] = test_sample["Predicted_PTS"] - test_sample[TARGET]
 
     display_cols = ["GAME_DATE", "MATCHUP", TARGET, "Predicted_PTS", "Error"]
     print("\n" + test_sample[display_cols].to_string(index=False))
 
     # ----------------------------
-    # SAVE MODEL
+    # SAVE MODEL & SCALER
     # ----------------------------
     os.makedirs("models", exist_ok=True)
     joblib.dump(model, MODEL_FILE)
+    joblib.dump(scaler, SCALER_FILE)
 
     feature_metadata = {
         "player_name": player_name,
         "features": FEATURES,
         "target": TARGET,
+        "model_type": "Ridge Regression",
         "train_games": len(train_df),
         "test_games": len(test_df),
         "test_r2": float(test_r2),
@@ -191,6 +199,7 @@ def train_model(player_name):
 
     print("\n" + "="*60)
     print(f"✓ Model saved to {MODEL_FILE}")
+    print(f"✓ Scaler saved to {SCALER_FILE}")
     print(f"✓ Metadata saved to {metadata_file}")
     print("\nDone!")
     

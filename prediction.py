@@ -20,6 +20,7 @@ import os
 # -------------------------------------------------------
 def load_model(player_name):
     model_path = f"models/{player_name}_points_model.pkl"
+    scaler_path = f"models/{player_name}_scaler.pkl"
     
     if not os.path.exists(model_path):
         print(f"❌ Model not found: {model_path}")
@@ -28,12 +29,18 @@ def load_model(player_name):
 
     print(f"✓ Loading model: {model_path}")
     model = joblib.load(model_path)
+    
+    # Load scaler if it exists
+    scaler = None
+    if os.path.exists(scaler_path):
+        scaler = joblib.load(scaler_path)
+        print(f"✓ Loading scaler: {scaler_path}")
 
     metadata_file = model_path.replace(".pkl", "_metadata.json")
     with open(metadata_file, "r") as f:
         metadata = json.load(f)
 
-    return model, metadata
+    return model, scaler, metadata
 
 
 # -------------------------------------------------------
@@ -159,8 +166,8 @@ def predict_next_game(
     Predict points for next game.
     """
     
-    # 1. Load model + metadata
-    model, metadata = load_model(player_name)
+    # 1. Load model + metadata + scaler
+    model, scaler, metadata = load_model(player_name)  # Changed this line
     features = metadata["features"]
 
     print(f"\n{'='*60}")
@@ -195,9 +202,13 @@ def predict_next_game(
 
     # 5. Convert to DataFrame (preserves feature names, fixes warning)
     X = pd.DataFrame([feature_dict], columns=features)
+    
+    # Scale if scaler exists
+    if scaler is not None:
+        X = scaler.transform(X)
 
     # 6. Make prediction
-    predicted_points = model.predict(X)[0]
+    predicted_points = model.predict(X)[0]      
 
     # 7. Display results
     print(f"{'='*60}")
