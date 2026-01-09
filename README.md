@@ -1,10 +1,20 @@
-# nba-preformance-predictor
-Uses machine learning to predict nba players' performances
+NBA Performance Predictor
+A machine learning project that predicts NBA player point totals for upcoming games based on recent performance, opponent strength, and game context.
+Overview
+This system uses Ridge Regression to predict player scoring based on:
+
+Recent Performance: Rolling averages (points, minutes, field goal attempts, rebounds, assists, FG%)
+Opponent Strength: Defensive rating, offensive rating, net rating, and pace
+Game Context: Home/away games, days of rest, back-to-back games
 
 # install
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+
+# to remove old data
+rm output/*_processed.csv
+rm models/*
 
 # run 
 # For Devin Booker (default)

@@ -1,6 +1,7 @@
 # get_stats.py
 """
 Fetches NBA data from the API - player logs and team stats.
+Multi-season support is built-in for better model training.
 """
 
 import pandas as pd
@@ -46,28 +47,10 @@ def get_last_season():
 
 
 # -----------------------------------------------------
-# Fetch all player logs for a season
-# -----------------------------------------------------
-def fetch_all_player_logs(season=None):
-    """Fetch game logs for all players in a season."""
-    if season is None:
-        season = get_current_season()
-    
-    print(f"Fetching all player logs for season: {season}")
-    
-    logs = playergamelogs.PlayerGameLogs(
-        season_nullable=season
-    ).get_data_frames()[0]
-    
-    print(f"Retrieved {len(logs)} game logs.")
-    return logs
-
-
-# -----------------------------------------------------
-# Fetch logs for a specific player
+# Fetch logs for a specific player (single season)
 # -----------------------------------------------------
 def fetch_player_logs(player_name, season=None):
-    """Fetch game logs for a specific player."""
+    """Fetch game logs for a specific player in one season."""
     if season is None:
         season = get_current_season()
     
@@ -91,7 +74,70 @@ def fetch_player_logs(player_name, season=None):
 
 
 # -----------------------------------------------------
-# Fetch team advanced stats (UPDATED)
+# Fetch logs for multiple seasons (DEFAULT METHOD)
+# -----------------------------------------------------
+def fetch_player_logs_multi_season(player_name, num_seasons=3):
+    """
+    Fetch game logs for a player across multiple seasons.
+    This is the recommended way to fetch data for better model accuracy.
+    
+    Args:
+        player_name (str): Full player name
+        num_seasons (int): Number of recent seasons to fetch (default: 3)
+    
+    Returns:
+        pd.DataFrame: Combined game logs from all seasons
+    """
+    # Auto-generate last N seasons
+    seasons = []
+    current = get_current_season()
+    current_year = int(current.split('-')[0])
+    
+    for i in range(num_seasons):
+        year = current_year - i
+        season_str = f"{year}-{str(year+1)[-2:]}"
+        seasons.append(season_str)
+    
+    seasons.reverse()  # Chronological order
+    
+    print(f"\n{'='*60}")
+    print(f"Fetching {num_seasons}-season data for {player_name}")
+    print(f"Seasons: {', '.join(seasons)}")
+    print(f"{'='*60}")
+    
+    all_logs = []
+    
+    for season in seasons:
+        try:
+            logs = fetch_player_logs(player_name, season)
+            if len(logs) > 0:
+                all_logs.append(logs)
+                print(f"  ✓ {season}: {len(logs)} games")
+            else:
+                print(f"  ⚠ {season}: No games found")
+        except Exception as e:
+            print(f"  ✗ {season}: Error - {str(e)}")
+    
+    if not all_logs:
+        raise ValueError(f"No data found for {player_name} in any season")
+    
+    # Combine all seasons
+    combined = pd.concat(all_logs, ignore_index=True)
+    
+    # Sort by date
+    combined["GAME_DATE"] = pd.to_datetime(combined["GAME_DATE"])
+    combined = combined.sort_values("GAME_DATE").reset_index(drop=True)
+    
+    print(f"{'='*60}")
+    print(f"✓ Total games: {len(combined)}")
+    print(f"  Date range: {combined['GAME_DATE'].min().date()} to {combined['GAME_DATE'].max().date()}")
+    print(f"{'='*60}\n")
+    
+    return combined
+
+
+# -----------------------------------------------------
+# Fetch team advanced stats
 # -----------------------------------------------------
 def fetch_team_stats(season=None):
     """Fetch defensive rating, offensive rating, net rating, and pace for all teams."""
@@ -102,10 +148,10 @@ def fetch_team_stats(season=None):
     
     stats = leaguedashteamstats.LeagueDashTeamStats(
         season=season,
-        measure_type_detailed_defense="Advanced"  # This gets advanced stats
+        measure_type_detailed_defense="Advanced"
     ).get_data_frames()[0]
     
-    # Keep only needed columns - now including OFF_RATING and NET_RATING
+    # Keep only needed columns
     required_cols = ["TEAM_ID", "TEAM_NAME", "DEF_RATING", "OFF_RATING", "NET_RATING", "PACE"]
     
     # Check which columns exist
@@ -114,11 +160,10 @@ def fetch_team_stats(season=None):
     
     if missing_cols:
         print(f"⚠️  Warning: Missing columns: {missing_cols}")
-        print(f"Available columns: {stats.columns.tolist()}")
     
     result = stats[available_cols].copy()
     
-    print(f"Retrieved stats for {len(result)} teams with columns: {available_cols}")
+    print(f"Retrieved stats for {len(result)} teams")
     return result
 
 
@@ -127,26 +172,21 @@ def fetch_team_stats(season=None):
 # -----------------------------------------------------
 if __name__ == "__main__":
     import os
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Fetch NBA data")
+    parser.add_argument("--player", type=str, default="Devin Booker")
+    parser.add_argument("--seasons", type=int, default=3)
+    args = parser.parse_args()
+    
     os.makedirs("output", exist_ok=True)
     
-    season = get_current_season()
-    print(f"Current season: {season}\n")
+    # Fetch multi-season data
+    player_logs = fetch_player_logs_multi_season(args.player, num_seasons=args.seasons)
+    player_logs.to_csv(f"output/{args.player}_raw.csv", index=False)
     
-    # Test: Fetch all logs
-    all_logs = fetch_all_player_logs(season)
-    all_logs.to_csv("output/nba_game_logs.csv", index=False)
-    print(f"Saved all logs: {len(all_logs)} rows\n")
-    
-    # Test: Fetch specific player
-    player = "Devin Booker"
-    player_logs = fetch_player_logs(player, season)
-    player_logs.to_csv(f"output/{player}_raw.csv", index=False)
-    print(f"Saved {player} logs: {len(player_logs)} games\n")
-    
-    # Test: Fetch team stats
-    team_stats = fetch_team_stats(season)
+    # Fetch team stats
+    team_stats = fetch_team_stats()
     team_stats.to_csv("output/team_stats.csv", index=False)
-    print(f"\nTeam stats columns: {team_stats.columns.tolist()}")
-    print(f"Sample data:\n{team_stats.head()}\n")
     
-    print("Done.")
+    print(f"\n✓ Saved data to output/ folder")

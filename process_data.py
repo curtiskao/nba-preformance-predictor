@@ -1,7 +1,8 @@
 # process_data.py
 """
 Processes raw NBA data into ML-ready features.
-Assumes data has already been fetched via get_stats.py
+Includes improved features for better XGBoost performance.
+Automatically fetches 3 seasons by default.
 """
 
 import pandas as pd
@@ -10,16 +11,23 @@ import argparse
 import os
 import util
 
+from get_stats import fetch_player_logs_multi_season, fetch_team_stats, get_current_season
+
+
 # -----------------------------------------------------
-# Feature engineering pipeline
+# Feature engineering with improved features
 # -----------------------------------------------------
 def engineer_features(player_logs, team_stats):
-    """Enhanced feature engineering with more predictive features."""
+    """
+    Comprehensive feature engineering for XGBoost.
+    Includes multiple rolling windows, consistency metrics, efficiency features.
+    """
     df = player_logs.copy()
     
     df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"])
     df = df.sort_values("GAME_DATE").reset_index(drop=True)
     
+    print("  → Mapping opponent teams...")
     # Opponent matching
     df["OPP_ABBREV"] = df["MATCHUP"].apply(lambda x: x.split(" ")[-1])
     df["OPP_TEAM_NAME"] = df["OPP_ABBREV"].map(util.NBA_TEAM_ABBREV_TO_NAME)
@@ -34,37 +42,114 @@ def engineer_features(player_logs, team_stats):
     df.drop(columns=["TEAM_NAME", "OPP_ABBREV"], inplace=True, errors="ignore")
     
     # ========================================
-    # ROLLING AVERAGES (with min_periods=1 to avoid NaN)
+    # MULTIPLE ROLLING WINDOWS (L3, L5, L10)
     # ========================================
-    # Use only 3-game window for limited data
-    df["PTS_last3"] = df["PTS"].shift(1).rolling(3, min_periods=1).mean()
-    df["MIN_last3"] = df["MIN"].shift(1).rolling(3, min_periods=1).mean()
-    df["FGA_last3"] = df["FGA"].shift(1).rolling(3, min_periods=1).mean()
-    df["REB_last3"] = df["REB"].shift(1).rolling(3, min_periods=1).mean()
-    df["AST_last3"] = df["AST"].shift(1).rolling(3, min_periods=1).mean()
-    df["FG_PCT_last3"] = df["FG_PCT"].shift(1).rolling(3, min_periods=1).mean()
+    print("  → Adding rolling averages (3, 5, 10 game windows)...")
     
-    # Fill first game with player's first game stats as baseline
-    for col in ["PTS_last3", "MIN_last3", "FGA_last3", "REB_last3", "AST_last3", "FG_PCT_last3"]:
-        base_col = col.replace("_last3", "")
-        df[col] = df[col].fillna(df[base_col])
+    # Short-term (last 3 games) - recent form
+    df["PTS_L3"] = df["PTS"].shift(1).rolling(3, min_periods=1).mean()
+    df["MIN_L3"] = df["MIN"].shift(1).rolling(3, min_periods=1).mean()
+    df["FGA_L3"] = df["FGA"].shift(1).rolling(3, min_periods=1).mean()
+    df["FG_PCT_L3"] = df["FG_PCT"].shift(1).rolling(3, min_periods=1).mean()
+    
+    # Medium-term (last 5 games) - stable form
+    df["PTS_L5"] = df["PTS"].shift(1).rolling(5, min_periods=1).mean()
+    df["MIN_L5"] = df["MIN"].shift(1).rolling(5, min_periods=1).mean()
+    df["FGA_L5"] = df["FGA"].shift(1).rolling(5, min_periods=1).mean()
+    df["FG_PCT_L5"] = df["FG_PCT"].shift(1).rolling(5, min_periods=1).mean()
+    
+    # Long-term (last 10 games) - season form
+    df["PTS_L10"] = df["PTS"].shift(1).rolling(10, min_periods=1).mean()
+    df["MIN_L10"] = df["MIN"].shift(1).rolling(10, min_periods=1).mean()
     
     # ========================================
-    # HOME/AWAY
+    # CONSISTENCY METRICS
     # ========================================
+    print("  → Adding consistency metrics...")
+    
+    df["PTS_STD_L10"] = df["PTS"].shift(1).rolling(10, min_periods=2).std()
+    df["PTS_STD_L10"] = df["PTS_STD_L10"].fillna(0)
+    
+    # ========================================
+    # EFFICIENCY METRICS
+    # ========================================
+    print("  → Adding efficiency metrics...")
+    
+    # Points per minute
+    df["PTS_PER_MIN_L5"] = df["PTS_L5"] / df["MIN_L5"].replace(0, 1)
+    
+    # True shooting percentage (accounts for 3s and FTs)
+    if "FTA" in df.columns:
+        df["TS_PCT_L5"] = df["PTS"].shift(1).rolling(5, min_periods=1).sum() / (
+            2 * (df["FGA"].shift(1).rolling(5, min_periods=1).sum() + 
+                 0.44 * df["FTA"].shift(1).rolling(5, min_periods=1).sum())
+        )
+        df["TS_PCT_L5"] = df["TS_PCT_L5"].fillna(0.5).replace([np.inf, -np.inf], 0.5)
+    else:
+        df["TS_PCT_L5"] = df["FG_PCT_L5"]
+    
+    # ========================================
+    # 3-POINT FEATURES
+    # ========================================
+    print("  → Adding 3-point features...")
+    
+    # 3-pointers MADE (not just attempts)
+    if "FG3M" in df.columns:
+        df["FG3M_L5"] = df["FG3M"].shift(1).rolling(5, min_periods=1).mean()
+    else:
+        df["FG3M_L5"] = 0
+    
+    df["FG3A_L5"] = df["FG3A"].shift(1).rolling(5, min_periods=1).mean()
+    df["FG3_PCT_L5"] = df["FG3_PCT"].shift(1).rolling(5, min_periods=1).mean()
+    df["FG3_PCT_L5"] = df["FG3_PCT_L5"].fillna(0).replace([np.inf, -np.inf], 0)
+    
+    # ========================================
+    # USAGE PROXY
+    # ========================================
+    print("  → Adding usage proxy...")
+    
+    if "TOV" in df.columns and "FTA" in df.columns:
+        df["USAGE_L5"] = (
+            df["FGA"].shift(1).rolling(5, min_periods=1).mean() +
+            0.44 * df["FTA"].shift(1).rolling(5, min_periods=1).mean() +
+            df["TOV"].shift(1).rolling(5, min_periods=1).mean()
+        )
+    else:
+        df["USAGE_L5"] = df["FGA_L5"]
+    
+    # ========================================
+    # GAME CONTEXT
+    # ========================================
+    print("  → Adding game context features...")
+    
     df["Is_Home"] = df["MATCHUP"].str.contains("vs").astype(int)
     
-    # ========================================
-    # REST DAYS
-    # ========================================
+    # Rest days
     df["Prev_Date"] = df["GAME_DATE"].shift(1)
     df["Days_Rest"] = (df["GAME_DATE"] - df["Prev_Date"]).dt.days
-    # Fill first game with 3 days rest (typical)
     df["Days_Rest"] = df["Days_Rest"].fillna(3)
     df["Is_BackToBack"] = (df["Days_Rest"] == 1).astype(int)
     
+    # ========================================
+    # TREND FEATURES
+    # ========================================
+    print("  → Adding trend features...")
+    
+    df["PTS_TREND"] = df["PTS_L3"] - df["PTS_L10"]
+    df["MIN_TREND"] = df["MIN_L3"] - df["MIN_L10"]
+    
     # Cleanup
     df.drop(columns=["Prev_Date"], inplace=True, errors="ignore")
+    
+    # Fill any remaining NaNs
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    for col in numeric_cols:
+        if df[col].isna().sum() > 0:
+            df[col] = df[col].fillna(df[col].median())
+        # Replace inf values
+        df[col] = df[col].replace([np.inf, -np.inf], df[col].median())
+    
+    print("  ✓ Feature engineering complete")
     
     return df
 
@@ -73,21 +158,13 @@ def engineer_features(player_logs, team_stats):
 # Complete processing pipeline
 # -----------------------------------------------------
 def process_player_data(player_name, player_logs, team_stats):
-    """
-    Complete processing pipeline for a player.
-    Returns processed dataframe ready for ML.
-    """
-    print(f"Processing data for {player_name}...")
+    """Complete processing pipeline."""
+    print(f"\nProcessing data for {player_name}...")
     print(f"Input: {len(player_logs)} games")
     
     df = engineer_features(player_logs, team_stats)
     
-    # Show stats before dropping
-    print(f"\nFeature completeness:")
-    print(f"  - Valid OPP_DEF_RATING: {df['OPP_DEF_RATING'].notna().sum()}/{len(df)}")
-    print(f"  - Valid PTS_last3: {df['PTS_last3'].notna().sum()}/{len(df)}")
-    
-    # Only drop rows missing opponent stats (critical for predictions)
+    # Only drop rows missing opponent stats
     initial_rows = len(df)
     df = df.dropna(subset=["OPP_DEF_RATING"])
     
@@ -97,45 +174,53 @@ def process_player_data(player_name, player_logs, team_stats):
 
 
 # -----------------------------------------------------
-# Main - for testing
+# Main
 # -----------------------------------------------------
 if __name__ == "__main__":
-    from get_stats import fetch_player_logs, fetch_team_stats, get_current_season
-    
     parser = argparse.ArgumentParser(
-        description="Process NBA player data for ML training"
+        description="Process NBA player data with improved features for XGBoost"
     )
     parser.add_argument(
         "--player",
         type=str,
         default="Devin Booker",
-        help="Player's full name (e.g., 'LeBron James', 'Stephen Curry')"
+        help="Player's full name"
+    )
+    parser.add_argument(
+        "--seasons",
+        type=int,
+        default=3,
+        help="Number of seasons to fetch (default: 3)"
     )
     
     args = parser.parse_args()
     
     os.makedirs("output", exist_ok=True)
     
-    season = get_current_season()
-    player = args.player
+    print(f"\n{'='*70}")
+    print(f"NBA DATA PROCESSING - {args.player}")
+    print(f"{'='*70}\n")
     
-    # Fetch data
-    print(f"Fetching data for {player}...\n")
-    player_logs = fetch_player_logs(player, season)
-    team_stats = fetch_team_stats(season)
+    # Fetch data (automatically multi-season)
+    player_logs = fetch_player_logs_multi_season(args.player, num_seasons=args.seasons)
+    team_stats = fetch_team_stats(get_current_season())
     
-    print(f"\nTeam stats loaded: {len(team_stats)} teams")
-    print(f"Player logs loaded: {len(player_logs)} games")
-    
-    # Process data
-    print("\n" + "="*60)
-    print("PROCESSING DATA")
-    print("="*60)
-    processed_df = process_player_data(player, player_logs, team_stats)
+    # Process
+    processed_df = process_player_data(args.player, player_logs, team_stats)
     
     # Save
-    output_path = f"output/{player}_processed.csv"
+    output_path = f"output/{args.player}_processed.csv"
     processed_df.to_csv(output_path, index=False)
-    print(f"\n✓ Saved to {output_path}")
     
-    print(f"\nNext step: python train_model.py --player \"{player}\"")
+    # Show summary
+    feature_cols = [col for col in processed_df.columns if 
+                   any(x in col for x in ['_L3', '_L5', '_L10', 'OPP_', 'Is_', 'TREND', 'STD', 'PER_MIN', 'USAGE', 'TS_'])]
+    
+    print(f"\n✓ Saved to {output_path}")
+    print(f"\nTotal features: {len(feature_cols)}")
+    print(f"  - Rolling averages: {len([f for f in feature_cols if '_L' in f])}")
+    print(f"  - Opponent features: {len([f for f in feature_cols if 'OPP_' in f])}")
+    print(f"  - Context features: {len([f for f in feature_cols if 'Is_' in f or 'Days_Rest' in f])}")
+    print(f"  - Efficiency/Trend: {len([f for f in feature_cols if any(x in f for x in ['TREND', 'STD', 'PER_MIN', 'TS_'])])}")
+    
+    print(f"\nNext step: python train_model.py --player \"{args.player}\"")

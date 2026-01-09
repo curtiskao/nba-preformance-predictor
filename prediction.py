@@ -1,10 +1,6 @@
+# prediction.py
 """
-prediction.py
--------------
-Predicts the next game's points for a player based on:
-1. Their recent performance (rolling averages)
-2. The upcoming opponent's stats
-3. Game context (home/away, rest days)
+Predicts next game points using trained XGBoost model.
 """
 
 import pandas as pd
@@ -15,11 +11,9 @@ import argparse
 import os
 
 
-# -------------------------------------------------------
-# LOAD MODEL + METADATA
-# -------------------------------------------------------
 def load_model(player_name):
-    model_path = f"models/{player_name}_points_model.pkl"
+    """Load trained model, scaler, and metadata."""
+    model_path = f"models/{player_name}_model.pkl"
     scaler_path = f"models/{player_name}_scaler.pkl"
     
     if not os.path.exists(model_path):
@@ -30,7 +24,6 @@ def load_model(player_name):
     print(f"✓ Loading model: {model_path}")
     model = joblib.load(model_path)
     
-    # Load scaler if it exists
     scaler = None
     if os.path.exists(scaler_path):
         scaler = joblib.load(scaler_path)
@@ -43,10 +36,8 @@ def load_model(player_name):
     return model, scaler, metadata
 
 
-# -------------------------------------------------------
-# LOAD PROCESSED PLAYER DATA
-# -------------------------------------------------------
 def load_processed_data(player_name):
+    """Load processed player data."""
     csv_path = f"output/{player_name}_processed.csv"
     if not os.path.exists(csv_path):
         print(f"❌ Processed data not found: {csv_path}")
@@ -60,24 +51,18 @@ def load_processed_data(player_name):
     return df
 
 
-# -------------------------------------------------------
-# LOAD TEAM STATS
-# -------------------------------------------------------
 def load_team_stats():
-    """Load pre-fetched team stats from output folder."""
+    """Load team statistics."""
     team_stats_path = "output/team_stats.csv"
     if not os.path.exists(team_stats_path):
         print(f"❌ Team stats not found: {team_stats_path}")
-        print("Run this first: python process_data.py --player \"Player Name\"")
+        print("Run: python process_data.py --player \"Player Name\"")
         exit(1)
     
     df = pd.read_csv(team_stats_path)
     return df
 
 
-# -------------------------------------------------------
-# BUILD FEATURE VECTOR FOR NEXT GAME
-# -------------------------------------------------------
 def build_next_game_features(
     recent_games_df,
     opponent_team_name,
@@ -86,17 +71,14 @@ def build_next_game_features(
     days_rest=2,
     feature_list=None
 ):
-    """
-    Constructs feature vector for the next game.
-    """
+    """Build feature vector for next game."""
     
     feature_dict = {}
     
     # Get opponent stats
     opp_row = team_stats_df[team_stats_df["TEAM_NAME"] == opponent_team_name]
     if opp_row.empty:
-        print(f"⚠️  Warning: Opponent '{opponent_team_name}' not found in team stats.")
-        print("    Using default values for opponent features.")
+        print(f"⚠️  Warning: '{opponent_team_name}' not found. Using defaults.")
         opp_def_rating = 110.0
         opp_off_rating = 110.0
         opp_net_rating = 0.0
@@ -108,25 +90,37 @@ def build_next_game_features(
         opp_net_rating = opp_row.get("NET_RATING", 0.0)
         opp_pace = opp_row.get("PACE", 100.0)
     
-    # Calculate rolling averages from recent games
-    last_3_games = recent_games_df.tail(3)
+    # Get recent games for rolling averages
+    last_3 = recent_games_df.tail(3)
+    last_5 = recent_games_df.tail(5)
+    last_10 = recent_games_df.tail(10)
     
     # Build features
     if feature_list:
         for feat in feature_list:
-            # Rolling averages
-            if feat == "PTS_last3":
-                feature_dict[feat] = last_3_games["PTS"].mean()
-            elif feat == "MIN_last3":
-                feature_dict[feat] = last_3_games["MIN"].mean()
-            elif feat == "FGA_last3":
-                feature_dict[feat] = last_3_games["FGA"].mean()
-            elif feat == "REB_last3":
-                feature_dict[feat] = last_3_games["REB"].mean()
-            elif feat == "AST_last3":
-                feature_dict[feat] = last_3_games["AST"].mean()
-            elif feat == "FG_PCT_last3":
-                feature_dict[feat] = last_3_games["FG_PCT"].mean()
+            # L3 features
+            if "_L3" in feat:
+                base = feat.replace("_L3", "")
+                if base in last_3.columns:
+                    feature_dict[feat] = last_3[base].mean()
+                else:
+                    feature_dict[feat] = 0
+            
+            # L5 features
+            elif "_L5" in feat:
+                base = feat.replace("_L5", "")
+                if base in last_5.columns:
+                    feature_dict[feat] = last_5[base].mean()
+                else:
+                    feature_dict[feat] = 0
+            
+            # L10 features
+            elif "_L10" in feat:
+                base = feat.replace("_L10", "")
+                if base in last_10.columns:
+                    feature_dict[feat] = last_10[base].mean()
+                else:
+                    feature_dict[feat] = 0
             
             # Opponent features
             elif feat == "OPP_DEF_RATING":
@@ -138,7 +132,7 @@ def build_next_game_features(
             elif feat == "OPP_PACE":
                 feature_dict[feat] = opp_pace
             
-            # Schedule features
+            # Game context
             elif feat == "Is_Home":
                 feature_dict[feat] = 1 if is_home else 0
             elif feat == "Is_BackToBack":
@@ -146,46 +140,70 @@ def build_next_game_features(
             elif feat == "Days_Rest":
                 feature_dict[feat] = days_rest
             
+            # Trend features
+            elif feat == "PTS_TREND":
+                pts_l3 = feature_dict.get("PTS_L3", 0)
+                pts_l10 = feature_dict.get("PTS_L10", pts_l3)
+                feature_dict[feat] = pts_l3 - pts_l10
+            elif feat == "MIN_TREND":
+                min_l3 = feature_dict.get("MIN_L3", 0)
+                min_l10 = feature_dict.get("MIN_L10", min_l3)
+                feature_dict[feat] = min_l3 - min_l10
+            
+            # Standard deviation
+            elif "STD" in feat:
+                base = feat.replace("_STD_L10", "")
+                if base in last_10.columns:
+                    feature_dict[feat] = last_10[base].std()
+                else:
+                    feature_dict[feat] = 0
+            
+            # Efficiency features
+            elif feat == "PTS_PER_MIN_L5":
+                pts = feature_dict.get("PTS_L5", 0)
+                mins = feature_dict.get("MIN_L5", 1)
+                feature_dict[feat] = pts / max(mins, 1)
+            
+            # Default
             else:
-                feature_dict[feat] = 0.0
-                print(f"⚠️  Unknown feature '{feat}', using 0")
+                feature_dict[feat] = 0
+    
+    # Clean inf/nan values
+    for key in feature_dict:
+        if np.isnan(feature_dict[key]) or np.isinf(feature_dict[key]):
+            feature_dict[key] = 0
     
     return feature_dict
 
 
-# -------------------------------------------------------
-# MAIN PREDICTION LOGIC
-# -------------------------------------------------------
 def predict_next_game(
     player_name,
     opponent_team_name,
     is_home=True,
     days_rest=2
 ):
-    """
-    Predict points for next game.
-    """
+    """Make prediction for next game."""
     
-    # 1. Load model + metadata + scaler
-    model, scaler, metadata = load_model(player_name)  # Changed this line
+    # Load model
+    model, scaler, metadata = load_model(player_name)
     features = metadata["features"]
 
     print(f"\n{'='*60}")
-    print(f"PREDICTING NEXT GAME FOR: {player_name}")
+    print(f"PREDICTING NEXT GAME: {player_name}")
     print(f"{'='*60}\n")
 
-    # 2. Load player's recent games
+    # Load data
     df = load_processed_data(player_name)
-    print(f"✓ Loaded {len(df)} recent games")
+    print(f"✓ Loaded {len(df)} games")
+    print(f"  Date range: {metadata['date_range']['start']} to {metadata['date_range']['end']}")
     
     last_game = df.iloc[-1]
     print(f"✓ Last game: {last_game['GAME_DATE'].date()} - {last_game['MATCHUP']} ({last_game['PTS']} pts)")
 
-    # 3. Load team stats
     team_stats = load_team_stats()
     print(f"✓ Loaded stats for {len(team_stats)} teams\n")
 
-    # 4. Build next game features
+    # Build features
     print(f"Next game details:")
     print(f"  Opponent: {opponent_team_name}")
     print(f"  Location: {'Home' if is_home else 'Away'}")
@@ -200,35 +218,38 @@ def predict_next_game(
         feature_list=features
     )
 
-    # 5. Convert to DataFrame (preserves feature names, fixes warning)
+    # Convert to DataFrame
     X = pd.DataFrame([feature_dict], columns=features)
     
-    # Scale if scaler exists
+    # Scale
     if scaler is not None:
         X = scaler.transform(X)
 
-    # 6. Make prediction
+    # Predict
     predicted_points = model.predict(X)[0]      
 
-    # 7. Display results
+    # Display results
     print(f"{'='*60}")
     print(f"PREDICTION RESULTS")
     print(f"{'='*60}\n")
     
     print(f"🎯 Predicted Points: {predicted_points:.1f}\n")
     
-    print(f"Recent Performance (last 3 games avg):")
-    print(f"  PTS: {feature_dict.get('PTS_last3', 0):.1f}")
-    print(f"  MIN: {feature_dict.get('MIN_last3', 0):.1f}")
-    print(f"  FGA: {feature_dict.get('FGA_last3', 0):.1f}")
+    print(f"Recent Performance (last 3-5 games):")
+    print(f"  PTS (L3): {feature_dict.get('PTS_L3', 0):.1f}")
+    print(f"  PTS (L5): {feature_dict.get('PTS_L5', 0):.1f}")
+    print(f"  MIN (L5): {feature_dict.get('MIN_L5', 0):.1f}")
+    print(f"  FGA (L5): {feature_dict.get('FGA_L5', 0):.1f}")
     
-    print(f"\nOpponent Strength ({opponent_team_name}):")
+    print(f"\nOpponent ({opponent_team_name}):")
     print(f"  DEF Rating: {feature_dict.get('OPP_DEF_RATING', 0):.1f}")
     print(f"  PACE: {feature_dict.get('OPP_PACE', 0):.1f}")
     
-    print(f"\nAll features used:")
-    for feat, val in feature_dict.items():
-        print(f"  {feat:20s} = {val:.2f}")
+    print(f"\nModel Info:")
+    print(f"  Algorithm: {metadata['model_type']}")
+    print(f"  Training games: {metadata['train_games']}")
+    print(f"  Test MAE: {metadata['test_mae']:.2f} points")
+    print(f"  Test R²: {metadata['test_r2']:.4f}")
     
     print(f"\n{'='*60}")
     print("✓ Prediction complete!")
@@ -237,9 +258,6 @@ def predict_next_game(
     return predicted_points, feature_dict
 
 
-# -------------------------------------------------------
-# CLI Support
-# -------------------------------------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Predict NBA player points for next game"
@@ -248,7 +266,7 @@ if __name__ == "__main__":
         "--player",
         type=str,
         default="Devin Booker",
-        help="Player's full name (e.g., 'LeBron James', 'Stephen Curry')"
+        help="Player's full name"
     )
     parser.add_argument(
         "--opponent",
@@ -259,7 +277,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--home",
         action="store_true",
-        help="Is this a home game? (default: away)"
+        help="Is this a home game?"
     )
     parser.add_argument(
         "--rest",
